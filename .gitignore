@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Generated embedding pipeline outputs
+metadata_for_embeddings*.jsonl
+metadata_with_embeddings*.jsonl
+embeddings*.jsonl
