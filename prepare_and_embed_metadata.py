@@ -73,12 +73,22 @@ def find_dataset_node(graph: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def extract_embedding_input(raw: dict[str, Any]) -> str:
+def dataset_node_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
     graph = [node for node in as_list(raw.get("@graph")) if isinstance(node, dict)]
-    nodes_by_id = {str(node["@id"]): node for node in graph if "@id" in node}
     dataset = find_dataset_node(graph)
     if dataset is None:
         raise ValueError("row does not contain a dcat:Dataset node")
+    return dataset
+
+
+def extract_dataset_id(raw: dict[str, Any]) -> str:
+    return str(dataset_node_from_raw(raw).get("@id", ""))
+
+
+def extract_embedding_input(raw: dict[str, Any]) -> str:
+    graph = [node for node in as_list(raw.get("@graph")) if isinstance(node, dict)]
+    nodes_by_id = {str(node["@id"]): node for node in graph if "@id" in node}
+    dataset = dataset_node_from_raw(raw)
 
     distribution_titles: list[str] = []
     for distribution_id in ref_ids(dataset.get("dcat:distribution")):
@@ -149,6 +159,10 @@ def read_embedding_inputs(path: Path) -> list[str]:
     return inputs
 
 
+def read_dataset_ids(path: Path) -> list[str]:
+    return [extract_dataset_id(raw) for _, raw in iter_jsonl(path)]
+
+
 def fetch_embeddings(
     client: Any,
     endpoint: str,
@@ -182,6 +196,7 @@ def fetch_embeddings(
 
 
 def write_embeddings_jsonl(
+    input_path: Path,
     prepared_path: Path,
     output_path: Path,
     endpoint: str,
@@ -199,10 +214,18 @@ def write_embeddings_jsonl(
         ) from exc
 
     embedding_inputs = read_embedding_inputs(prepared_path)
+    dataset_ids = read_dataset_ids(input_path)
+    if len(dataset_ids) != len(embedding_inputs):
+        raise ValueError(
+            f"expected the same number of source rows and embedding input rows, "
+            f"got {len(dataset_ids)} and {len(embedding_inputs)}"
+        )
+
     count = 0
     with httpx.Client(headers={"Content-Type": "application/json"}) as client:
         with output_path.open("w", encoding="utf-8") as output:
             for batch in chunks(embedding_inputs, batch_size):
+                batch_dataset_ids = dataset_ids[count : count + len(batch)]
                 embeddings = fetch_embeddings(
                     client=client,
                     endpoint=endpoint,
@@ -211,9 +234,12 @@ def write_embeddings_jsonl(
                     timeout_seconds=timeout_seconds,
                     retries=retries,
                 )
-                for embedding_input, embedding in zip(batch, embeddings, strict=True):
+                for dataset_id, embedding_input, embedding in zip(
+                    batch_dataset_ids, batch, embeddings, strict=True
+                ):
                     embedded_record = {
                         "input_line": count + 1,
+                        "dataset_id": dataset_id,
                         "embedding_input": embedding_input,
                         "embedding_model": model,
                         "embedding": embedding,
@@ -265,6 +291,7 @@ def main() -> int:
         return 0
 
     embedded_count = write_embeddings_jsonl(
+        input_path=args.input_jsonl,
         prepared_path=args.prepared_output,
         output_path=args.embeddings_output,
         endpoint=args.endpoint,
