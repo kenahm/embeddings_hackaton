@@ -15,6 +15,7 @@ import httpx
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 
@@ -27,6 +28,8 @@ class SearchRecord:
     input_line: int
     dataset_id: str
     embedding_input: str
+    title: str
+    description: str
 
 
 @dataclass
@@ -40,7 +43,7 @@ class EmbeddingIndex:
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     embeddings_file: str = Field(min_length=1)
-    k: int = Field(default=10, ge=1, le=100)
+    k: int = Field(default=5, ge=1, le=100)
 
 
 class SearchResult(BaseModel):
@@ -48,7 +51,8 @@ class SearchResult(BaseModel):
     score: float
     input_line: int
     dataset_id: str
-    embedding_input: str
+    title: str
+    description: str
 
 
 class SearchResponse(BaseModel):
@@ -92,6 +96,19 @@ def normalize_vector(vector: np.ndarray) -> np.ndarray:
     return vector / norm
 
 
+def parse_embedding_input(embedding_input: str) -> tuple[str, str]:
+    title = ""
+    description = ""
+    for line in embedding_input.splitlines():
+        if line.startswith("passage: Title: "):
+            title = line.removeprefix("passage: Title: ").strip()
+        elif line.startswith("Title: "):
+            title = line.removeprefix("Title: ").strip()
+        elif line.startswith("Description: "):
+            description = line.removeprefix("Description: ").strip()
+    return title, description
+
+
 def load_embedding_index(path: Path) -> EmbeddingIndex:
     records: list[SearchRecord] = []
     embeddings: list[list[float]] = []
@@ -107,11 +124,15 @@ def load_embedding_index(path: Path) -> EmbeddingIndex:
         if not model:
             model = str(row.get("embedding_model") or embedding_model)
 
+        embedding_input = str(row.get("embedding_input") or "")
+        title, description = parse_embedding_input(embedding_input)
         records.append(
             SearchRecord(
                 input_line=int(row.get("input_line") or line_number),
                 dataset_id=str(row.get("dataset_id") or ""),
-                embedding_input=str(row.get("embedding_input") or ""),
+                embedding_input=embedding_input,
+                title=title,
+                description=description,
             )
         )
         embeddings.append(embedding)
@@ -187,10 +208,44 @@ def top_k(index: EmbeddingIndex, query_vector: np.ndarray, k: int) -> list[Searc
                 score=float(scores[index_position]),
                 input_line=record.input_line,
                 dataset_id=record.dataset_id,
-                embedding_input=record.embedding_input,
+                title=record.title,
+                description=record.description,
             )
         )
     return results
+
+
+def run_search(request: SearchRequest) -> SearchResponse:
+    index = get_embedding_index(request.embeddings_file)
+    query_vector = embed_query(request.query.strip())
+    results = top_k(index, query_vector, request.k)
+    return SearchResponse(
+        query=request.query,
+        embeddings_file=str(index.path),
+        embedding_model=index.model,
+        total_vectors=len(index.records),
+        results=results,
+    )
+
+
+def format_search_response(response: SearchResponse) -> str:
+    lines = [
+        f"Query: {response.query}",
+        f"Embeddings file: {response.embeddings_file}",
+        f"Total vectors: {response.total_vectors}",
+        "",
+    ]
+    for result in response.results:
+        lines.extend(
+            [
+                f"{result.rank}. {result.title or '(no title)'}",
+                f"   ID: {result.dataset_id or '(missing)'}",
+                f"   Score: {result.score:.4f}",
+                f"   Description: {result.description or '(no description)'}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
 
 
 @app.get("/health")
@@ -201,21 +256,21 @@ def health() -> dict[str, str]:
 @app.post("/search")
 def search(request: SearchRequest) -> SearchResponse:
     try:
-        index = get_embedding_index(request.embeddings_file)
-        query_vector = embed_query(request.query.strip())
-        results = top_k(index, query_vector, request.k)
+        return run_search(request)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"embedding endpoint failed: {exc}") from exc
 
-    return SearchResponse(
-        query=request.query,
-        embeddings_file=str(index.path),
-        embedding_model=index.model,
-        total_vectors=len(index.records),
-        results=results,
-    )
+
+@app.post("/search/text", response_class=PlainTextResponse)
+def search_text(request: SearchRequest) -> str:
+    try:
+        return format_search_response(run_search(request))
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"embedding endpoint failed: {exc}") from exc
 
 
 def parse_args() -> argparse.Namespace:

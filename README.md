@@ -14,14 +14,13 @@ Run the brute-force search API:
 uv run python search_api.py --host 0.0.0.0 --port 8080
 ```
 
-Search an embeddings JSONL file:
+Search an embeddings JSONL file with human-readable output:
 
 ```bash
-curl http://127.0.0.1:8080/search \
+curl http://127.0.0.1:8080/search/text \
   -H "Content-Type: application/json" \
   -d '{
     "query": "point cloud registration methods",
-    "embeddings_file": "metadata_with_embeddings.jsonl",
-    "k": 5
+    "embeddings_file": "metadata_with_embeddings.jsonl"
   }'
 ```
