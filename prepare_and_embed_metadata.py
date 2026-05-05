@@ -13,6 +13,12 @@ from typing import Any
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8000/v1/embeddings"
 DEFAULT_MODEL = "intfloat/e5-mistral-7b-instruct"
+MAX_SKIP_WARNINGS = 20
+
+DCT_TITLE_KEYS = ("dct:title", "http://purl.org/dc/terms/title")
+DCT_DESCRIPTION_KEYS = ("dct:description", "http://purl.org/dc/terms/description")
+DCAT_KEYWORD_KEYS = ("dcat:keyword", "http://www.w3.org/ns/dcat#keyword")
+DCAT_DISTRIBUTION_KEYS = ("dcat:distribution", "http://www.w3.org/ns/dcat#distribution")
 
 
 def as_list(value: Any) -> list[Any]:
@@ -53,7 +59,28 @@ def clean_text(value: str) -> str:
 
 
 def node_types(node: dict[str, Any]) -> set[str]:
-    return set(str(value) for value in as_list(node.get("@type")))
+    values: set[str] = set()
+    for value in as_list(node.get("@type")):
+        if isinstance(value, dict) and "@id" in value:
+            values.add(str(value["@id"]))
+        else:
+            values.add(str(value))
+    return values
+
+
+def is_dcat_dataset_type(value: str) -> bool:
+    return value in {
+        "dcat:Dataset",
+        "http://www.w3.org/ns/dcat#Dataset",
+        "https://www.w3.org/ns/dcat#Dataset",
+    }
+
+
+def get_value(node: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in node:
+            return node[key]
+    return None
 
 
 def ref_ids(value: Any) -> list[str]:
@@ -68,13 +95,24 @@ def ref_ids(value: Any) -> list[str]:
 
 def find_dataset_node(graph: list[dict[str, Any]]) -> dict[str, Any] | None:
     for node in graph:
-        if "dcat:Dataset" in node_types(node):
+        if any(is_dcat_dataset_type(value) for value in node_types(node)):
             return node
     return None
 
 
-def dataset_node_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
+def graph_from_raw(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return []
     graph = [node for node in as_list(raw.get("@graph")) if isinstance(node, dict)]
+    return graph if graph else [raw]
+
+
+def dataset_node_from_raw(raw: dict[str, Any]) -> dict[str, Any] | None:
+    return find_dataset_node(graph_from_raw(raw))
+
+
+def require_dataset_node(raw: dict[str, Any]) -> dict[str, Any]:
+    graph = graph_from_raw(raw)
     dataset = find_dataset_node(graph)
     if dataset is None:
         raise ValueError("row does not contain a dcat:Dataset node")
@@ -82,23 +120,23 @@ def dataset_node_from_raw(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_dataset_id(raw: dict[str, Any]) -> str:
-    return str(dataset_node_from_raw(raw).get("@id", ""))
+    return str(require_dataset_node(raw).get("@id", ""))
 
 
 def extract_embedding_input(raw: dict[str, Any]) -> str:
-    graph = [node for node in as_list(raw.get("@graph")) if isinstance(node, dict)]
+    graph = graph_from_raw(raw)
     nodes_by_id = {str(node["@id"]): node for node in graph if "@id" in node}
-    dataset = dataset_node_from_raw(raw)
+    dataset = require_dataset_node(raw)
 
     distribution_titles: list[str] = []
-    for distribution_id in ref_ids(dataset.get("dcat:distribution")):
+    for distribution_id in ref_ids(get_value(dataset, DCAT_DISTRIBUTION_KEYS)):
         distribution = nodes_by_id.get(distribution_id)
         if distribution:
-            distribution_titles.extend(scalar_values(distribution.get("dct:title")))
+            distribution_titles.extend(scalar_values(get_value(distribution, DCT_TITLE_KEYS)))
 
-    title = first_scalar(dataset.get("dct:title"))
-    description = first_scalar(dataset.get("dct:description"))
-    keywords = scalar_values(dataset.get("dcat:keyword"))
+    title = first_scalar(get_value(dataset, DCT_TITLE_KEYS))
+    description = first_scalar(get_value(dataset, DCT_DESCRIPTION_KEYS))
+    keywords = scalar_values(get_value(dataset, DCAT_KEYWORD_KEYS))
 
     embedding_fields = {
         "dct:title": title,
@@ -119,6 +157,8 @@ def build_embedding_input(record: dict[str, Any]) -> str:
         parts.append(f"Keywords: {', '.join(record['dcat:keyword'])}")
     if record["distribution_dct:title"]:
         parts.append(f"Distribution titles: {', '.join(record['distribution_dct:title'])}")
+    if not parts:
+        return ""
     return "passage: " + "\n".join(parts)
 
 
@@ -135,11 +175,32 @@ def iter_jsonl(path: Path) -> Any:
 
 def write_prepared_jsonl(input_path: Path, output_path: Path) -> int:
     count = 0
+    skipped = 0
     with output_path.open("w", encoding="utf-8") as output:
-        for _, raw in iter_jsonl(input_path):
+        for line_number, raw in iter_jsonl(input_path):
+            if dataset_node_from_raw(raw) is None:
+                if skipped < MAX_SKIP_WARNINGS:
+                    print(
+                        f"skipping {input_path}:{line_number}: "
+                        "row does not contain a dcat:Dataset node",
+                        file=sys.stderr,
+                    )
+                skipped += 1
+                continue
             embedding_input = extract_embedding_input(raw)
+            if not embedding_input:
+                if skipped < MAX_SKIP_WARNINGS:
+                    print(
+                        f"skipping {input_path}:{line_number}: "
+                        "dataset row has no embeddable title, description, keyword, or distribution title",
+                        file=sys.stderr,
+                    )
+                skipped += 1
+                continue
             output.write(json.dumps(embedding_input, ensure_ascii=False) + "\n")
             count += 1
+    if skipped:
+        print(f"skipped {skipped} row(s)", file=sys.stderr)
     return count
 
 
@@ -160,7 +221,14 @@ def read_embedding_inputs(path: Path) -> list[str]:
 
 
 def read_dataset_ids(path: Path) -> list[str]:
-    return [extract_dataset_id(raw) for _, raw in iter_jsonl(path)]
+    dataset_ids: list[str] = []
+    for _, raw in iter_jsonl(path):
+        if dataset_node_from_raw(raw) is None:
+            continue
+        if not extract_embedding_input(raw):
+            continue
+        dataset_ids.append(extract_dataset_id(raw))
+    return dataset_ids
 
 
 def fetch_embeddings(
