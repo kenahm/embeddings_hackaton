@@ -10,7 +10,23 @@ Install the Python environment with `uv`:
 uv sync
 ```
 
-The embedding model server must already be running and must expose an OpenAI-compatible embeddings endpoint at:
+## Server Setup
+
+On a fresh server or cluster node, clone the repository and install the Python dependencies:
+
+```bash
+git clone <YOUR_REPOSITORY_URL>
+cd embeddings_hackaton
+uv sync
+```
+
+If the Wien prototype data is tracked in Git, it should already be present after cloning:
+
+```bash
+ls -lh katalog_metadaten_total_wien.jsonl
+```
+
+The scripts expect an OpenAI-compatible embeddings endpoint at:
 
 ```text
 http://127.0.0.1:8000/v1/embeddings
@@ -21,6 +37,48 @@ The default model name used by the scripts is:
 ```text
 intfloat/e5-mistral-7b-instruct
 ```
+
+vLLM is assumed to already be installed on the GPU server.
+
+Start the embedding model with vLLM in a separate terminal or job session:
+
+```bash
+vllm serve intfloat/e5-mistral-7b-instruct \
+  --runner pooling \
+  --dtype float16 \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+This is the known working command for the prototype setup. If you want the service to be reachable only from the same machine, use `--host 127.0.0.1` instead of `--host 0.0.0.0`.
+
+If your installed vLLM version does not support `--runner pooling`, use the older embedding-mode flag:
+
+```bash
+vllm serve intfloat/e5-mistral-7b-instruct \
+  --task embed \
+  --dtype float16 \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --trust-remote-code
+```
+
+Quickly test the endpoint:
+
+```bash
+curl http://127.0.0.1:8000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "intfloat/e5-mistral-7b-instruct",
+    "input": [
+      "query: Radwege in Wien",
+      "passage: Wien stellt offene Verwaltungsdaten bereit."
+    ],
+    "encoding_format": "float"
+  }'
+```
+
+For a cluster, run the vLLM command on a GPU node, not on a login node. Keep that process running while you build embeddings and while you run search queries.
 
 ## Build The Wien Prototype Database
 
