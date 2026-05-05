@@ -6,3 +6,4 @@ __pycache__/
 metadata_for_embeddings*.jsonl
 metadata_with_embeddings*.jsonl
 embeddings*.jsonl
+.DS_Store

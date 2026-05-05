@@ -88,6 +88,26 @@ The small prototype input file is:
 katalog_metadaten_total_wien.jsonl
 ```
 
+For each JSONL row, the script reads the JSON-LD `dcat:Dataset` node and keeps only these fields for embedding:
+
+```text
+dct:title
+dct:description
+dcat:keyword
+dcat:distribution -> dcat:Distribution -> dct:title
+```
+
+Those fields are converted into one text passage like this:
+
+```text
+passage: Title: ...
+Description: ...
+Keywords: ...
+Distribution titles: ...
+```
+
+The dataset `@id` is not embedded as semantic text. It is copied into the final embeddings file as `dataset_id` so search results can be traced back to the source dataset.
+
 Create the embedding input rows and the final vector database:
 
 ```bash
