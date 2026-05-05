@@ -59,6 +59,17 @@ uv run python search_api.py --host 0.0.0.0 --port 8080
 
 The API loads `metadata_with_embeddings_wien.jsonl` on the first query, converts vectors into a normalized NumPy matrix, and keeps that matrix cached in memory while the server is running.
 
+Starting the API does not load a database yet. The embeddings file is selected by each search request:
+
+```json
+{
+  "query": "Radwege in Wien",
+  "embeddings_file": "metadata_with_embeddings_wien.jsonl"
+}
+```
+
+On the first request for a given `embeddings_file`, the API reads that file, converts all vectors into a NumPy matrix, and caches it. Later requests using the same unchanged file reuse the cached matrix.
+
 ## Query The Wien Database
 
 Human-readable output:
